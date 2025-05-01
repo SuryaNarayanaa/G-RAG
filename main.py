@@ -2,15 +2,8 @@ import os
 from src.ingestion.connectors.pdf_parser import PDFParser
 from src.ingestion.connectors.image_parser import ImageParser
 from src.ingestion.connectors.audio_parser import AudioParser
+from src.ingestion.connectors.video_parser import VideoParser
 
-
-from PIL import Image
-import pytesseract
-import numpy as np
-from typing import Dict, Optional, Union
-import json
-import cv2
-import pandas as pd
 
 # First handle PDF parsing
 pdf_path = "testing/tables2.pdf"
@@ -47,4 +40,14 @@ parser = AudioParser(audio_path)
 
 # Transcribe using Whisper
 transcript_path = parser.extract_text_with_whisper()
+print(f"Transcript saved to: {transcript_path}")
+
+
+youtube_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+video_path = VideoParser.download_youtube_video(youtube_url)
+print(f"YouTube video downloaded to: {video_path}")
+
+
+parser = VideoParser(video_path)
+transcript_path = parser.transcribe_video(model="whisper")
 print(f"Transcript saved to: {transcript_path}")
