@@ -1,47 +1,50 @@
-import fitz 
-import camelot
-import os 
-from pdf2docx import Converter
-import csv
-import pymupdf4llm
-import pathlib
-
-TESTING_DIR = 'testing/'
-PDF_DIR = TESTING_DIR+'tables2.pdf'
-OUTPUT_DIR = 'output/'
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(TESTING_DIR, exist_ok=True)
+import os
+from src.ingestion.connectors.pdf_parser import PDFParser
+from src.ingestion.connectors.image_parser import ImageParser
+from src.ingestion.connectors.audio_parser import AudioParser
 
 
+from PIL import Image
+import pytesseract
+import numpy as np
+from typing import Dict, Optional, Union
+import json
+import cv2
+import pandas as pd
 
-# -- table extraction 
-cv = Converter(PDF_DIR)
-tables = cv.extract_tables()
-for idx, table in enumerate(tables, 1):
-    csv_file = os.path.join(OUTPUT_DIR, f'table_{idx}.csv')
-    with open(csv_file, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerows(table)
-cv.close()
+# First handle PDF parsing
+pdf_path = "testing/tables2.pdf"
+output_dir = "output/"
 
-## -- save as md for llm
-md_text = pymupdf4llm.to_markdown("testing/1.pdf")
-pathlib.Path("output.md").write_bytes(md_text.encode())
+parser = PDFParser(pdf_path, output_dir)
 
-# -- text and image
-with fitz.open(PDF_DIR) as doc:
-    for page_index ,page in enumerate(doc, start=1):
-        images = page.get_images()
-        text = page.get_text()
-        with open(OUTPUT_DIR + 'op.txt', 'a', encoding='utf-8') as f:
+table_paths = parser.extract_tables()
+print("Extracted tables saved to:", table_paths)
 
-            f.write(text)
-        for image_index, img in enumerate(images, start=1):
-            xref = img[0] # get the XREF of the image
-            pix = fitz.Pixmap(doc, xref) # create a Pixmap
+text_file, image_files = parser.extract_text_and_images()
+print("Extracted text saved to:", text_file)
+print("Extracted images saved to:", image_files)
 
-            if pix.n - pix.alpha > 3: # CMYK: convert to RGB first
-                pix = fitz.Pixmap(fitz.csRGB, pix)
+markdown_path = parser.convert_to_markdown()
+print("Markdown file saved to:", markdown_path)
 
-            pix.save(OUTPUT_DIR + "page_%s-image_%s.png" % (page_index, image_index)) # save the image as png
-            pix = None
+# Now handle any images that were extracted
+# for image_file in image_files[0]:
+image_parser = ImageParser('D:\\Learning\\projects\\G-RAG\\testing\\image.png', 'D:\\Learning\\projects\\G-RAG\\testing')
+
+# Preprocess the image
+preprocessed_image = image_parser.preprocess_image()
+if preprocessed_image:
+    print(f"Preprocessed image saved to: {preprocessed_image}")
+
+# Extract content from image
+image_content = image_parser.extract_text_and_metadata()
+if image_content:
+    print("Extracted content from {}")
+
+audio_path = "testing/audio.wav"
+parser = AudioParser(audio_path)
+
+# Transcribe using Whisper
+transcript_path = parser.extract_text_with_whisper()
+print(f"Transcript saved to: {transcript_path}")
