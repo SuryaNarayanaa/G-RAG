@@ -1,7 +1,5 @@
 import os
 from moviepy.editor import VideoFileClip
-from pytube import YouTube
-from pydub import AudioSegment
 import yt_dlp
 from .audio_parser import AudioParser
 

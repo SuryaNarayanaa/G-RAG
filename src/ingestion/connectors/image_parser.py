@@ -1,11 +1,12 @@
-import os
-from PIL import Image
-import pytesseract
-import numpy as np
-from typing import Dict, Optional, Union
 import json
+import os
+from typing import Dict, Optional, Union
+
 import cv2
-import pandas as pd
+import numpy as np
+import pytesseract
+from PIL import Image
+
 
 class ImageParser:
     def __init__(self, image_path: str, output_dir: str = "output/"):

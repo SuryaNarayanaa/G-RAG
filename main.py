@@ -1,4 +1,3 @@
-import os
 from src.ingestion.connectors.pdf_parser import PDFParser
 from src.ingestion.connectors.image_parser import ImageParser
 from src.ingestion.connectors.audio_parser import AudioParser
