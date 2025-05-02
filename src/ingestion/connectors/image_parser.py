@@ -12,7 +12,7 @@ class ImageParser:
     def __init__(self, image_path: str, output_dir: str = "output/"):
         self.image_path = image_path
         self.output_dir = output_dir
-        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)  
         
     def extract_text_and_metadata(self) -> Optional[Dict[str, Union[str, dict]]]:
         """Extract text, pictures, tables and metadata from image for RAG processing."""
