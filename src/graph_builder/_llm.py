@@ -1162,5 +1162,34 @@ class LLMGraphTransformer:
         return GraphDocument(nodes=nodes, relationships=relationships, source=document)
 
     # ... (convert_to_graph_documents and aconvert_to_graph_documents remain the same) ...
+    
+    def convert_to_graph_documents(
+        self, documents: Sequence[Document], config: Optional[RunnableConfig] = None
+    ) -> List[GraphDocument]:
+        """Convert a sequence of documents into graph documents.
+
+        Args:
+            documents (Sequence[Document]): The original documents.
+            kwargs: Additional keyword arguments.
+
+        Returns:
+            Sequence[GraphDocument]: The transformed documents as graphs.
+        """
+        return [self.process_response(document, config) for document in documents]
+
+    
+    async def aconvert_to_graph_documents(
+        self, documents: Sequence[Document], config: Optional[RunnableConfig] = None
+    ) -> List[GraphDocument]:
+        """
+        Asynchronously convert a sequence of documents into graph documents.
+        """
+        tasks = [
+            asyncio.create_task(self.aprocess_response(document, config))
+            for document in documents
+        ]
+        results = await asyncio.gather(*tasks)
+        return results
+
 
 # --- END OF CLASS ---class LLMGraphTransformer:

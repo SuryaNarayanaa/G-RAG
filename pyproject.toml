@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "camelot-py[cv]>=1.0.0",
-    "faiss-gpu",
     "ffmpeg-python>=0.2.0",
     "ipykernel>=6.29.5",
     "langchain>=0.3.24",
@@ -14,6 +13,9 @@ dependencies = [
     "langchain-google-genai>=2.1.4",
     "langchain-neo4j>=0.4.0",
     "langchain-openai>=0.3.15",
+    "llama-index>=0.12.34",
+    "llama-index-graph-stores-kuzu>=0.7.0",
+    "llama-index-vector-stores-lancedb>=0.3.2",
     "moviepy>=1.0.3",
     "neo4j>=5.28.1",
     "openai-whisper>=20240930",
