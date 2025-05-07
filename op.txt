@@ -1,0 +1,21 @@
+   Neuro Prune: An Adaptive Approach for Efficient
+   Deep Neural Network Optimization on Edge
+   Devices
+   Dr. Karpagam G R1, Adhish Krishna S2, Mohana Kumar P3, Sanjay J4, Surya Narayanaa N T5
+   1Professor, Department of Computer Science and Engineering, PSG College of Technology
+   grk.cse@psgtech.ac.in
+   2,3,4,5BE-CSE (AI&ML), PSG College of Technology
+   adhishthesak@gmail.com, mohanakumarp2828@gmail.com
+   sanjayjayakumar91@gmail.com , suryanarayanaant@gmail.com
+   Abstract—The optimization of deep neural networks for de-
+   ployment on edge devices is a significant research area due to
+   the demand for applications such as augmented reality, smart
+   cameras, and autonomous navigation. However, deploying large
+   deep learning models on edge devices poses challenges related to
+   computational power, energy consumption, and latency. Pruning
+   is a method to reduce the model size, accelerate inference, and
+   save power. The objective of the paper is to propose the Neuro
+   Prune algorithm and to apply it for the optimization of deep
+   neural networks on edge devices. Efforts have been made to
+   compare pruned and unpruned models. As a result, the pruned
+   model has an accuracy increase of 0.22%.
