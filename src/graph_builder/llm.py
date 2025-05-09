@@ -15,6 +15,9 @@ from langchain_core.prompts import (
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field, create_model
 
+
+from sentence_transformers import SentenceTransformer
+
 DEFAULT_NODE_TYPE = "Node"
 
 examples = [
@@ -687,16 +690,20 @@ class LLMGraphTransformer:
         relationship_properties: Union[bool, List[str]] = False,
         ignore_tool_usage: bool = False,
         additional_instructions: str = "",
+        embed_model_name: str = "all-MiniLM-L6-v2",
+        
     ) -> None:
+        print("Init LLMGraphTransformer")
         # Validate and check allowed relationships input
         self._relationship_type = validate_and_get_relationship_type(
             allowed_relationships, allowed_nodes
         )
-
+        self.embedder = SentenceTransformer(embed_model_name)
         self.allowed_nodes = allowed_nodes
         self.allowed_relationships = allowed_relationships
         self.strict_mode = strict_mode
         self._function_call = not ignore_tool_usage
+
         # Check if the LLM really supports structured output
         if self._function_call:
             try:
@@ -743,6 +750,9 @@ class LLMGraphTransformer:
             structured_llm = llm.with_structured_output(schema, include_raw=True)
             prompt = prompt or get_default_prompt(additional_instructions)
             self.chain = prompt | structured_llm
+    def _embed_text(self, text: str) -> List[float]:
+        vec = self.embedder.encode(text, normalize_embeddings=True)
+        return vec.tolist()
 
     def process_response(
         self, document: Document, config: Optional[RunnableConfig] = None
@@ -795,6 +805,7 @@ class LLMGraphTransformer:
             nodes = [Node(id=el[0], type=el[1]) for el in list(nodes_set)]
             
         for node in nodes:
+            print("Node -- ",node.id)
             # store the snippet that generated this node
             node.properties.setdefault("source_texts", [])
 
@@ -805,9 +816,12 @@ class LLMGraphTransformer:
             if hasattr(document, "metadata") and document.metadata.get("page"):
                 node.properties["source_page"] = document.metadata["page"]
 
+        
         # (Optional) also attach context to relationships:
         for rel in relationships:
+            print("Rel -- ", rel)
             rel.properties["source_text"] = text
+            
 
         # Strict mode filtering
         if self.strict_mode and (self.allowed_nodes or self.allowed_relationships):
@@ -853,11 +867,16 @@ class LLMGraphTransformer:
     def convert_to_graph_documents(
         self, documents: Sequence[Document], config: Optional[RunnableConfig] = None
     ) -> List[GraphDocument]:
+        print("In -- convert_to_graph_documents")
         chunk_graphs: List[GraphDocument] = [
             self.process_response(doc, config) for doc in documents
         ]
+        for doc in chunk_graphs:
+            print(doc.nodes)
+            print(doc.relationships)
 
         # 2) Merge nodes
+        print("Merging")
         merged_nodes: dict[str, Node] = {}
         for gd in chunk_graphs:
             for node in gd.nodes:
@@ -875,19 +894,28 @@ class LLMGraphTransformer:
                     )
                     merged_nodes[node.id] = new_node
 
-        # 3) Merge relationships (you could dedupe here if desired)
+        # 3) Merge relationships
         merged_rels: List[Relationship] = []
         for gd in chunk_graphs:
             merged_rels.extend(gd.relationships)
 
-        # 4) Build a single GraphDocument using the first Document as “source”
+        # 4) Compute embeddings for each node now that snippets are final
+        for node in merged_nodes.values():
+            context = " ".join(node.properties.get("source_texts", []))
+            node.properties["embedding"] = self._embed_text(context)
+
+        # (Optional) also embed relationships if you like:
+        for rel in merged_rels:
+            text = rel.properties.get("source_text", "")
+            if text:
+                rel.properties["embedding"] = self._embed_text(text)
+
+        # 5) Build final GraphDocument
         big_graph = GraphDocument(
             nodes=list(merged_nodes.values()),
             relationships=merged_rels,
             source=documents[0]
         )
-
-        # 5) Return as a single-element list
         return [big_graph]
 
     async def aprocess_response(
