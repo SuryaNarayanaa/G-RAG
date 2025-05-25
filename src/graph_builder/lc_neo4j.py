@@ -1,4 +1,5 @@
 from hashlib import md5
+from neo4j import GraphDatabase
 from typing import Any, Dict, List, Optional, Type
 
 import neo4j
@@ -368,8 +369,333 @@ class Neo4jGraph(GraphStore):
                     "properties":   r.properties,
                 })
             self.query(rel_import_query, {"data": rel_data})
+    def create_vector_index(
+        self,
+        index_name: str,
+        label: str,
+        property_name: str,
+        dimension: int,
+        is_relationship: bool = False,
+        relationship_type: str = None,
+        similarity_function: str = "COSINE"
+    ) -> None:
+        """
+        Create a vector index in Neo4j for nodes or relationships.
+
+        Args:
+            index_name: Name of the index.
+            label: Node label or relationship type.
+            property_name: Name of the property containing the embedding.
+            dimension: Dimension of the embedding vector.
+            is_relationship: If True, attempts to create a relationship index.
+            relationship_type: Relationship type (required if is_relationship is True).
+            similarity_function: The similarity function to use (either "COSINE" or "EUCLIDEAN").
+        
+        Raises:
+            ValueError: If similarity_function is invalid or relationship index is requested
+            Neo4jError: If index creation fails for any other reason than index already exists
+        """
+        self._check_driver_state()
+        
+        if is_relationship:
+            # Relationship vector indexes are not supported in Neo4j
+            print(f"Warning: Relationship vector indexes are not supported in Neo4j. "
+                  f"The index creation for relationship type '{relationship_type}' will be skipped. "
+                  f"Consider storing vector data in nodes instead.")
+            return
+            
+        # Validate similarity function
+        similarity_function = similarity_function.upper()
+        if similarity_function not in ["COSINE", "EUCLIDEAN"]:
+            raise ValueError("similarity_function must be either 'COSINE' or 'EUCLIDEAN'")
+            
+        # Use the modern vector index syntax
+        cypher = (
+            f"CREATE VECTOR INDEX {index_name} IF NOT EXISTS "
+            f"FOR (n:{label}) "
+            f"ON (n.{property_name}) "
+            f"OPTIONS {{ "
+            f"indexConfig: {{ "
+            f"`vector.dimensions`: {dimension}, "
+            f"`vector.similarity_function`: '{similarity_function}' "
+            f"}} "
+            f"}}"
+        )
+        
+        # Execute the query with better error handling
+        try:
+            self.query(cypher)
+            print(
+                f"Vector index '{index_name}' created for node label '{label}' "
+                f"on property '{property_name}' with dimension {dimension} "
+                f"using {similarity_function} similarity."
+            )
+        except Exception as e:
+            error_msg = str(e)
+            if "AlreadyIndexedException" in error_msg:
+                print(f"Info: Index '{index_name}' already exists for {label}.{property_name}")
+            elif "SyntaxError" in error_msg:
+                raise ValueError(f"Invalid syntax in index creation. This may indicate "
+                               f"that your Neo4j version doesn't support the modern vector "
+                               f"index syntax. Error: {error_msg}")
+            else:
+                raise
+
+    def _get_vector_index_name(self, type_name: str) -> str:
+        """Generate consistent index name for a node or relationship type."""
+        return f"{type_name.lower()}Embeddings"
+
+    def vector_search(
+        self,
+        query_embedding: List[float],
+        type_name: str,
+        k: int = 5,
+        is_relationship: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        Perform vector similarity search for either nodes or relationships.
+        
+        Args:
+            query_embedding: The query vector to search with
+            type_name: The type of node or relationship to search
+            k: Number of results to return
+            is_relationship: Whether this is a relationship type
+            
+        Returns:
+            List of dictionaries containing the matched items and their scores
+            
+        Note:
+            Relationship vector search is not supported in Neo4j. The method will
+            return an empty list for relationship searches.
+        """
+        self._check_driver_state()
+        
+        if is_relationship:
+            print(f"Warning: Relationship vector search is not supported in Neo4j. "
+                  f"Consider storing vector data in nodes instead. "
+                  f"Skipping search for relationship type '{type_name}'.")
+            return []
+        
+        # Use modern vector search syntax for nodes
+        cypher = f"""
+        MATCH (item:{type_name})
+        WHERE item.embedding IS NOT NULL
+        WITH item, vector.similarity.cosine(item.embedding, $embedding) AS score
+        ORDER BY score DESC
+        LIMIT $k
+        RETURN item, score
+        """
+        
+        try:
+            return self.query(
+                cypher,
+                params={
+                    'k': k,
+                    'embedding': query_embedding
+                }
+            )
+        except Exception as e:
+            error_msg = str(e)
+            if "no such vector schema index" in error_msg.lower():
+                print(f"Warning: No vector index found for node type '{type_name}'. "
+                      f"The index might not exist or the type name could be incorrect.")
+                return []
+            elif "SyntaxError" in error_msg:
+                # Try falling back to old syntax if modern syntax fails
+                # This should not normally happen as we create indexes with new syntax
+                print("Warning: Modern vector search syntax not supported. "
+                      "Trying legacy procedure...")
+                cypher = """
+                CALL db.index.vector.queryNodes($index_name, $k, $embedding)
+                YIELD node AS item, score
+                RETURN item, score
+                ORDER BY score DESC
+                """
+                return self.query(
+                    cypher,
+                    params={
+                        'index_name': self._get_vector_indexed_types(type_name),
+                        'k': k,
+                        'embedding': query_embedding
+                    }
+                )
+            else:
+                raise    
+    def search_similar_nodes(
+        self,
+        query_embedding: List[float],
+        node_types: Optional[List[str]] = None,
+        k: int = 5,
+        print_results: bool = True
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Search for similar nodes across multiple node types.
+        
+        Args:
+            query_embedding: The query vector to search with
+            node_types: List of node types to search. If None, will search all indexed types.
+            k: Number of results to return per node type
+            print_results: Whether to print the results
+            
+        Returns:
+            Dict mapping node types to their search results
+        """
+        self._check_driver_state()
+        
+        # If no node types specified, get all node types that have vector indexes
+        if node_types is None:
+            cypher = """
+            SHOW INDEXES
+            YIELD name, type, labelsOrTypes
+            WHERE type = 'VECTOR'
+            AND name ENDS WITH 'Embeddings'
+            AND (labelsOrTypes IS NOT NULL AND size(labelsOrTypes) > 0)
+            RETURN distinct labelsOrTypes[0] as nodeType
+            """
+            results = self.query(cypher)
+            node_types = [r["nodeType"] for r in results]
+        
+        results = {}
+        for node_type in node_types:
+            try:
+                type_results = self.vector_search(
+                    query_embedding=query_embedding,
+                    type_name=node_type,
+                    k=k,
+                    is_relationship=False
+                )
+                results[node_type] = type_results
+            except Exception as e:
+                print(f"Warning: Could not search node type {node_type}: {str(e)}")
+        
+        if print_results:
+            self._print_top_results(results, k)
+                
+        return results
+
+    def search_similar_relationships(
+        self,
+        query_embedding: List[float],
+        relationship_types: Optional[List[str]] = None,
+        k: int = 5
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Search for similar relationships across multiple relationship types.
+        
+        Args:
+            query_embedding: The query vector to search with
+            relationship_types: List of relationship types to search. If None, will search all indexed types.
+            k: Number of results to return per relationship type
+            
+        Returns:
+            Dict mapping relationship types to their search results
+        """
+        self._check_driver_state()
+        
+        # If no relationship types specified, get all relationship types that have vector indexes
+        if relationship_types is None:
+            cypher = """
+            SHOW INDEXES
+            YIELD name, type, labelsOrTypes
+            WHERE type = 'VECTOR'
+            AND name ENDS WITH 'Embeddings'
+            AND (labelsOrTypes IS NOT NULL AND size(labelsOrTypes) > 0)
+            RETURN distinct labelsOrTypes[0] as relType
+            """
+            results = self.query(cypher)
+            relationship_types = [r["relType"] for r in results]
+        
+        results = {}
+        for rel_type in relationship_types:
+            try:
+                type_results = self.vector_search(
+                    query_embedding=query_embedding,
+                    type_name=rel_type,
+                    k=k,
+                    is_relationship=True
+                )
+                results[rel_type] = type_results
+            except Exception as e:
+                print(f"Warning: Could not search relationship type {rel_type}: {str(e)}")
+                
+        return results
 
 
+    def create_vector_indexes_for_documents(
+        self,
+        graph_documents: List[GraphDocument],
+    ) -> None:
+        """
+        Create vector indexes for all node and relationship types that have embeddings.
+        
+        Args:
+            graph_documents: List of GraphDocument objects to analyze and create indexes for
+        """
+        # Get all unique node types and relationship types from the documents
+        node_types = set()
+        relationship_types = set()
+        
+        for doc in graph_documents:
+            # Collect all node types that have embeddings
+            for node in doc.nodes:
+                if hasattr(node, 'properties') and 'embedding' in node.properties:
+                    node_types.add(node.type)
+            
+            # Collect all relationship types that have embeddings
+            for rel in doc.relationships:
+                if hasattr(rel, 'properties') and 'embedding' in rel.properties:
+                    relationship_types.add(rel.type)
+
+        # Create vector indexes for each node type that has embeddings
+        for node_type in node_types:
+            index_name = self._get_vector_index_name(node_type)
+            try:
+                self.create_vector_index(
+                    index_name=index_name,
+                    label=node_type,
+                    property_name="embedding",
+                    dimension=self.embedding_dim
+                )
+            except Exception as e:
+                print(f"Warning: Could not create index for node type {node_type}: {str(e)}")
+
+        # Create vector indexes for each relationship type that has embeddings
+        for rel_type in relationship_types:
+            index_name = self._get_vector_index_name(rel_type)
+            try:
+                self.create_vector_index(
+                    index_name=index_name,
+                    label=rel_type,
+                    property_name="embedding",
+                    dimension=self.embedding_dim,
+                    is_relationship=True
+                )
+            except Exception as e:
+                print(f"Warning: Could not create index for relationship type {rel_type}: {str(e)}")
+                
+    def setup_graph_with_documents(
+        self,
+        graph_documents: List[GraphDocument],
+        include_source: bool = True,
+        base_entity_label: bool = False
+    ) -> None:
+        """
+        Complete setup of the graph with documents - stores documents and creates all necessary indexes.
+        
+        Args:
+            graph_documents: List of GraphDocument objects to store and index
+            include_source: Whether to include source document information
+            base_entity_label: Whether to use a base entity label for all nodes
+        """
+        # 1. First store the documents in Neo4j
+        self.add_graph_documents(
+            graph_documents=graph_documents,
+            include_source=include_source,
+            baseEntityLabel=base_entity_label
+        )
+        
+        # 2. Create vector indexes for all types that have embeddings
+        self.create_vector_indexes_for_documents(graph_documents)
     def close(self) -> None:
         """
         Explicitly close the Neo4j driver connection.
@@ -450,3 +776,163 @@ class Neo4jGraph(GraphStore):
         except Exception:
             # Suppress any exceptions during garbage collection
             pass
+
+    def _get_vector_indexed_types(self) -> List[str]:
+        """Get all types (nodes/relationships) that have vector indexes."""
+        cypher = """
+        SHOW INDEXES
+        YIELD name, type, labelsOrTypes
+        WHERE type = 'VECTOR'
+        AND name ENDS WITH 'Embeddings'
+        AND (labelsOrTypes IS NOT NULL AND size(labelsOrTypes) > 0)
+        RETURN distinct labelsOrTypes[0] as type
+        """
+        results = self.query(cypher)
+        return [r["type"] for r in results]
+
+    def _print_top_results(
+        self,
+        results: Dict[str, List[Dict[str, Any]]],
+        k: int = 5,
+        include_score: bool = True
+    ) -> None:
+        """
+        Helper method to print the top k results from vector search.
+        
+        Args:
+            results: Dictionary mapping types to their search results
+            k: Number of top results to print per type
+            include_score: Whether to include similarity scores in output
+        """
+        for type_name, type_results in results.items():
+            print(f"\nTop {k} results for {type_name}:")
+            if not type_results:
+                print("  No results found")
+                continue
+                
+            # Sort results by score in descending order
+            sorted_results = sorted(type_results, key=lambda x: x['score'], reverse=True)
+            for i, result in enumerate(sorted_results[:k]):
+                item = result['item']
+                
+                # Get display property - prefer text/content/name/id
+                display_props = ['text', 'content', 'name', 'id']
+                display_value = next(
+                    (str(item.get(p)) for p in display_props if item.get(p) is not None),
+                    str(item.get('id', 'No ID'))
+                )
+                
+                # Truncate long values
+                if len(display_value) > 100:
+                    display_value = display_value[:97] + "..."
+                
+                # Print result with optional score
+                if include_score:
+                    print(f"  {i+1}. [{result['score']:.3f}] {display_value}")
+                else:
+                    print(f"  {i+1}. {display_value}")
+
+    def search_similar_nodes(
+        self,
+        query_embedding: List[float],
+        node_types: Optional[List[str]] = None,
+        k: int = 5,
+        print_results: bool = True
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Search for similar nodes across multiple node types.
+        
+        Args:
+            query_embedding: The query vector to search with
+            node_types: List of node types to search. If None, will search all indexed types.
+            k: Number of results to return per node type
+            print_results: Whether to print the results
+            
+        Returns:
+            Dict mapping node types to their search results
+        """
+        self._check_driver_state()
+        
+        # If no node types specified, get all node types that have vector indexes
+        if node_types is None:
+            cypher = """
+            SHOW INDEXES
+            YIELD name, type, labelsOrTypes
+            WHERE type = 'VECTOR'
+            AND name ENDS WITH 'Embeddings'
+            AND (labelsOrTypes IS NOT NULL AND size(labelsOrTypes) > 0)
+            RETURN distinct labelsOrTypes[0] as nodeType
+            """
+            results = self.query(cypher)
+            node_types = [r["nodeType"] for r in results]
+        
+        results = {}
+        for node_type in node_types:
+            try:
+                type_results = self.vector_search(
+                    query_embedding=query_embedding,
+                    type_name=node_type,
+                    k=k,
+                    is_relationship=False
+                )
+                results[node_type] = type_results
+            except Exception as e:
+                print(f"Warning: Could not search node type {node_type}: {str(e)}")
+        
+        if print_results:
+            self._print_top_results(results, k)
+                
+        return results
+
+    def search_similar_relationships(
+        self,
+        query_embedding: List[float],
+        relationship_types: Optional[List[str]] = None,
+        k: int = 5,
+        print_results: bool = True
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Search for similar relationships across multiple relationship types.
+        Note: Relationship vector search is not currently supported in Neo4j.
+        
+        Args:
+            query_embedding: The query vector to search with
+            relationship_types: List of relationship types to search. If None, will search all indexed types.
+            k: Number of results to return per relationship type
+            print_results: Whether to print the results
+            
+        Returns:
+            Dict mapping relationship types to their search results (empty in current version)
+        """
+        self._check_driver_state()
+        
+        # If no relationship types specified, get all relationship types that have vector indexes
+        if relationship_types is None:
+            cypher = """
+            SHOW INDEXES
+            YIELD name, type, labelsOrTypes
+            WHERE type = 'VECTOR'
+            AND name ENDS WITH 'Embeddings'
+            AND (labelsOrTypes IS NOT NULL AND size(labelsOrTypes) > 0)
+            RETURN distinct labelsOrTypes[0] as relType
+            """
+            results = self.query(cypher)
+            relationship_types = [r["relType"] for r in results]
+        
+        results = {}
+        for rel_type in relationship_types:
+            try:
+                type_results = self.vector_search(
+                    query_embedding=query_embedding,
+                    type_name=rel_type,
+                    k=k,
+                    is_relationship=True
+                )
+                results[rel_type] = type_results
+            except Exception as e:
+                print(f"Warning: Could not search relationship type {rel_type}: {str(e)}")
+        
+        if print_results:
+            self._print_top_results(results, k)
+                
+        return results
