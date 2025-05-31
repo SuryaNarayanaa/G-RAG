@@ -17,6 +17,7 @@ dependencies = [
     "llama-index>=0.12.34",
     "llama-index-graph-stores-kuzu>=0.7.0",
     "llama-index-vector-stores-lancedb>=0.3.2",
+    "logging>=0.4.9.6",
     "moviepy>=1.0.3",
     "neo4j>=5.28.1",
     "neo4j-graphrag>=1.7.0",
@@ -36,6 +37,7 @@ dependencies = [
     "sentence-transformers>=4.1.0",
     "spacy>=3.8.5",
     "speechrecognition>=3.14.2",
+    "termcolor>=3.1.0",
     "transformers>=4.51.3",
     "yt-dlp>=2025.4.30",
 ]

@@ -756,207 +756,255 @@ class LLMGraphTransformer:
     def _embed_text(self, text: str) -> List[float]:
         vec = self.embedder.encode(text, normalize_embeddings=True, show_progress_bar=True ,)
         return vec.tolist()
-
     def process_response(
         self, document: Document, config: Optional[RunnableConfig] = None
     ) -> GraphDocument:
-        text = document.page_content
-        raw_schema = self.chain.invoke({"input": text}, config=config)
-        if self._function_call:
-            raw_schema = cast(Dict[Any, Any], raw_schema)
-            nodes, relationships = _convert_to_graph_document(raw_schema)
-        else:
-            nodes_set = set()
-            relationships = []
-            if not isinstance(raw_schema, str):
-                raw_schema = raw_schema.content
-            parsed_json = self.json_repair.loads(raw_schema)
-            if isinstance(parsed_json, dict):
-                parsed_json = [parsed_json]
-            for rel in parsed_json:
-                # Check if mandatory properties are there
-                if (
-                    not isinstance(rel, dict)
-                    or not rel.get("head")
-                    or not rel.get("tail")
-                    or not rel.get("relation")
-                ):
-                    continue
-                # Nodes need to be deduplicated using a set
-                # Use default Node label for nodes if missing
-                # Convert 'head' and 'tail' to strings if they are lists or other unhashable types
-                head = rel["head"] if isinstance(rel["head"], (str, int)) else str(rel["head"])
-                tail = rel["tail"] if isinstance(rel["tail"], (str, int)) else str(rel["tail"])
-
-                # Add nodes to the set
-                nodes_set.add((head, rel.get("head_type", DEFAULT_NODE_TYPE)))
-                nodes_set.add((tail, rel.get("tail_type", DEFAULT_NODE_TYPE)))
-
-
-                source_node = Node(
-                    id=rel["head"], type=rel.get("head_type", DEFAULT_NODE_TYPE)
-                )
-                target_node = Node(
-                    id=rel["tail"], type=rel.get("tail_type", DEFAULT_NODE_TYPE)
-                )
-                relationships.append(
-                    Relationship(
-                        source=source_node, target=target_node, type=rel["relation"]
-                    )
-                )
-            # Create nodes list
-            nodes = [Node(id=el[0], type=el[1]) for el in list(nodes_set)]
-        
-        passage_id = hashlib.md5(text.encode()).hexdigest()
-        passage_node = Node(
-            id=passage_id,
-            type="Passage",
-            properties={
-                "text": text,
-                "source_doc_id": document.metadata.get("doc_id"),
-                "source_page": document.metadata.get("page"),
-            }
-        )
-        
-        # 2) Compute embedding for this Passage
-        passage_node.properties["embedding"] = self._embed_text(text)
-        
-        # 3) Build MENTIONS relationships from this Passage to each entity
-        mentions_rels = [
-            Relationship(
-                source=passage_node,
-                target=Node(
-                    id=n.id, 
-                    type=n.type,
-                    properties=n.properties.copy() if n.properties else {}
-                ),
-                type="MENTIONS",
-                properties={"source_text": text}
-            )
-            for n in nodes
-        ]
-        
-        for node in nodes:
-            # print("Node -- ",node.id)
-            # store the snippet that generated this node
-            node.properties.setdefault("source_texts", [])
-
-            node.properties["source_texts"].append(text)    
-            # if you have metadata (e.g. doc_id or page#), carry it too:
-            if hasattr(document, "metadata") and document.metadata.get("doc_id"):
-                node.properties["source_doc_id"] = document.metadata["doc_id"]
-            if hasattr(document, "metadata") and document.metadata.get("page"):
-                node.properties["source_page"] = document.metadata["page"]
-
-        
-        # (Optional) also attach context to relationships:
-        for rel in relationships:
-            # print("Rel -- ", rel)
-            rel.properties["source_text"] = text
+        try:
+            text = document.page_content
+            raw_schema = self.chain.invoke({"input": text}, config=config)
             
+            # Block 1: Function call handling
+            if self._function_call:
+                try:
+                    raw_schema = cast(Dict[Any, Any], raw_schema)
+                    nodes, relationships = _convert_to_graph_document(raw_schema)
+                except (TypeError, ValueError) as e:
+                    print(f"Error in function call processing: {e}")
+                    nodes, relationships = [], []
+            else:
+                try:
+                    nodes_set = set()
+                    relationships = []
+                    if not isinstance(raw_schema, str):
+                        raw_schema = raw_schema.content
+                    parsed_json = self.json_repair.loads(raw_schema)
+                    if isinstance(parsed_json, dict):
+                        parsed_json = [parsed_json]
+                        
+                    # Block 2: Relationship and node processing
+                    for rel in parsed_json:
+                        try:
+                            if (
+                                not isinstance(rel, dict)
+                                or not rel.get("head")
+                                or not rel.get("tail")
+                                or not rel.get("relation")
+                            ):
+                                continue
+                                
+                            head = rel["head"] if isinstance(rel["head"], (str, int)) else str(rel["head"])
+                            tail = rel["tail"] if isinstance(rel["tail"], (str, int)) else str(rel["tail"])
 
-        # Strict mode filtering
-        if self.strict_mode and (self.allowed_nodes or self.allowed_relationships):
-            if self.allowed_nodes:
-                lower_allowed_nodes = [el.lower() for el in self.allowed_nodes]
-                nodes = [
-                    node for node in nodes if node.type.lower() in lower_allowed_nodes
-                ]
-                relationships = [
-                    rel
-                    for rel in relationships
-                    if rel.source.type.lower() in lower_allowed_nodes
-                    and rel.target.type.lower() in lower_allowed_nodes
-                ]
-            if self.allowed_relationships:
-                # Filter by type and direction
-                if self._relationship_type == "tuple":
-                    relationships = [
-                        rel
-                        for rel in relationships
-                        if (
-                            (
-                                rel.source.type.lower(),
-                                rel.type.lower(),
-                                rel.target.type.lower(),
+                            nodes_set.add((head, rel.get("head_type", DEFAULT_NODE_TYPE)))
+                            nodes_set.add((tail, rel.get("tail_type", DEFAULT_NODE_TYPE)))
+
+                            source_node = Node(
+                                id=head, type=rel.get("head_type", DEFAULT_NODE_TYPE)
                             )
-                            in [  # type: ignore
-                                (s_t.lower(), r_t.lower(), t_t.lower())
-                                for s_t, r_t, t_t in self.allowed_relationships
-                            ]
-                        )
-                    ]
-                else:  # Filter by type only
-                    relationships = [
-                        rel
-                        for rel in relationships
-                        if rel.type.lower()
-                        in [el.lower() for el in self.allowed_relationships]  # type: ignore
-                    ]
+                            target_node = Node(
+                                id=tail, type=rel.get("tail_type", DEFAULT_NODE_TYPE)
+                            )
+                            relationships.append(
+                                Relationship(
+                                    source=source_node, target=target_node, type=rel["relation"]
+                                )
+                            )
+                        except (TypeError, ValueError) as e:
+                            print(f"Error processing relationship: {e}")
+                            continue
+                            
+                    nodes = [Node(id=el[0], type=el[1]) for el in list(nodes_set)]
+                except (json.JSONDecodeError, TypeError, ValueError) as e:
+                    print(f"Error in JSON processing: {e}")
+                    nodes, relationships = [], []
 
-        return GraphDocument(
+            # Block 3: Passage node creation
+            try:
+                passage_id = hashlib.md5(text.encode()).hexdigest()
+                passage_node = Node(
+                    id=passage_id,
+                    type="Passage",
+                    properties={
+                        "text": text,
+                        "source_doc_id": document.metadata.get("doc_id"),
+                        "source_page": document.metadata.get("page"),
+                    }
+                )
+                passage_node.properties["embedding"] = self._embed_text(text)
+            except (TypeError, ValueError) as e:
+                print(f"Error creating passage node: {e}")
+                passage_node = Node(id="error_passage", type="Passage")
+
+            # Block 4: MENTIONS relationships
+            try:
+                mentions_rels = [
+                    Relationship(
+                        source=passage_node,
+                        target=Node(
+                            id=n.id, 
+                            type=n.type,
+                            properties=n.properties.copy() if n.properties else {}
+                        ),
+                        type="MENTIONS",
+                        properties={"source_text": text}
+                    )
+                    for n in nodes
+                ]
+            except (TypeError, ValueError) as e:
+                print(f"Error creating MENTIONS relationships: {e}")
+                mentions_rels = []
+
+            # Block 5: Node properties
+            for node in nodes:
+                try:
+                    node.properties.setdefault("source_texts", [])
+                    node.properties["source_texts"].append(text)
+                    if hasattr(document, "metadata"):
+                        if document.metadata.get("doc_id"):
+                            node.properties["source_doc_id"] = document.metadata["doc_id"]
+                        if document.metadata.get("page"):
+                            node.properties["source_page"] = document.metadata["page"]
+                except (TypeError, AttributeError) as e:
+                    print(f"Error setting node properties: {e}")
+                    continue
+
+            # Block 6: Relationship properties
+            for rel in relationships:
+                try:
+                    rel.properties["source_text"] = text
+                except (TypeError, AttributeError) as e:
+                    print(f"Error setting relationship properties: {e}")
+                    continue
+
+            # Block 7: Strict mode filtering
+            if self.strict_mode and (self.allowed_nodes or self.allowed_relationships):
+                try:
+                    if self.allowed_nodes:
+                        lower_allowed_nodes = [el.lower() for el in self.allowed_nodes]
+                        nodes = [
+                            node for node in nodes if node.type.lower() in lower_allowed_nodes
+                        ]
+                        relationships = [
+                            rel
+                            for rel in relationships
+                            if rel.source.type.lower() in lower_allowed_nodes
+                            and rel.target.type.lower() in lower_allowed_nodes
+                        ]
+                    if self.allowed_relationships:
+                        if self._relationship_type == "tuple":
+                            relationships = [
+                                rel
+                                for rel in relationships
+                                if (
+                                    (
+                                        rel.source.type.lower(),
+                                        rel.type.lower(),
+                                        rel.target.type.lower(),
+                                    )
+                                    in [
+                                        (s_t.lower(), r_t.lower(), t_t.lower())
+                                        for s_t, r_t, t_t in self.allowed_relationships
+                                    ]
+                                )
+                            ]
+                        else:
+                            relationships = [
+                                rel
+                                for rel in relationships
+                                if rel.type.lower()
+                                in [el.lower() for el in self.allowed_relationships]
+                            ]
+                except (TypeError, AttributeError) as e:
+                    print(f"Error in strict mode filtering: {e}")
+
+            return GraphDocument(
                 nodes=[passage_node] + nodes,
                 relationships=mentions_rels + relationships,
+                source=document
+            )
+            
+        except Exception as e:
+            print(f"Critical error in process_response: {e}")
+            return GraphDocument(
+                nodes=[Node(id="error", type="Error")],
+                relationships=[],
                 source=document
             )
 
     def convert_to_graph_documents(
         self, documents: Sequence[Document], config: Optional[RunnableConfig] = None
     ) -> List[GraphDocument]:
-        print("In -- convert_to_graph_documents")
-        chunk_graphs: List[GraphDocument] = [
-            self.process_response(doc, config) for doc in documents
-        ]
-        # for doc in chunk_graphs:
-        #     print(doc.nodes)
-        #     print(doc.relationships)
+        try:
+            print("In -- convert_to_graph_documents")
+            chunk_graphs: List[GraphDocument] = [
+                self.process_response(doc, config) for doc in documents
+            ]
 
-        # 2) Merge nodes
-        print("Merging Nodes")
-        merged_nodes: dict[str, Node] = {}
-        for gd in chunk_graphs:
-            for node in gd.nodes:
-                # ensure we have a list for accumulating
-                snippets = node.properties.get("source_texts") or []
-                # if this node already seen, extend its snippet list
-                if node.id in merged_nodes:
-                    merged_nodes[node.id].properties["source_texts"].extend(snippets)
-                else:
-                    # copy so we don’t accidentally share references
-                    new_node = Node(
-                        id=node.id,
-                        type=node.type,
-                        properties={ **node.properties, "source_texts": list(snippets) }
-                    )
-                    merged_nodes[node.id] = new_node
+            # Block 8: Node merging
+            print("Merging Nodes")
+            merged_nodes: dict[str, Node] = {}
+            try:
+                for gd in chunk_graphs:
+                    for node in gd.nodes:
+                        try:
+                            snippets = node.properties.get("source_texts") or []
+                            if node.id in merged_nodes:
+                                merged_nodes[node.id].properties["source_texts"].extend(snippets)
+                            else:
+                                new_node = Node(
+                                    id=node.id,
+                                    type=node.type,
+                                    properties={ **node.properties, "source_texts": list(snippets) }
+                                )
+                                merged_nodes[node.id] = new_node
+                        except (TypeError, AttributeError) as e:
+                            print(f"Error merging node: {e}")
+                            continue
+            except Exception as e:
+                print(f"Error in node merging: {e}")
+                merged_nodes = {}
 
-        # 3) Merge relationships
-        print("3) Merge relationships")
-        merged_rels: List[Relationship] = []
-        for gd in chunk_graphs:
-            merged_rels.extend(gd.relationships)
+            # Block 9: Relationship merging
+            print("Merging relationships")
+            merged_rels: List[Relationship] = []
+            try:
+                for gd in chunk_graphs:
+                    merged_rels.extend(gd.relationships)
+            except (TypeError, AttributeError) as e:
+                print(f"Error merging relationships: {e}")
 
-        # 4) Compute embeddings for each node now that snippets are final
-        print("4) Compute embeddings for each node now that snippets are final")
-        for node in merged_nodes.values():
-            context = " ".join(node.properties.get("source_texts", []))
-            node.properties["embedding"] = self._embed_text(context)
+            # Block 10: Computing embeddings
+            print("Computing embeddings for nodes")
+            for node in merged_nodes.values():
+                try:
+                    context = " ".join(node.properties.get("source_texts", []))
+                    node.properties["embedding"] = self._embed_text(context)
+                except (TypeError, ValueError) as e:
+                    print(f"Error computing node embedding: {e}")
 
-        # (Optional) also embed relationships if you like:
-        print("5) embeding relationships")
-        for rel in merged_rels:
-            text = rel.properties.get("source_text", "")
-            if text:
-                rel.properties["embedding"] = self._embed_text(text)
+            print("Computing embeddings for relationships")
+            for rel in merged_rels:
+                try:
+                    text = rel.properties.get("source_text", "")
+                    if text:
+                        rel.properties["embedding"] = self._embed_text(text)
+                except (TypeError, ValueError) as e:
+                    print(f"Error computing relationship embedding: {e}")
 
-        # 5) Build final GraphDocument
-        print("Building final GraphDocument")
-        big_graph = GraphDocument(
-            nodes=list(merged_nodes.values()),
-            relationships=merged_rels,
-            source=documents[0]
-        )
-        return [big_graph]
+            print("Building final GraphDocument")
+            return [GraphDocument(
+                nodes=list(merged_nodes.values()),
+                relationships=merged_rels,
+                source=documents[0]
+            )]
+            
+        except Exception as e:
+            print(f"Critical error in convert_to_graph_documents: {e}")
+            return [GraphDocument(
+                nodes=[Node(id="error", type="Error")],
+                relationships=[],
+                source=documents[0]
+            )]
 
     async def aprocess_response(
         self, document: Document, config: Optional[RunnableConfig] = None
